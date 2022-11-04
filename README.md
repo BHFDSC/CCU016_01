@@ -1,8 +1,7 @@
 # Antipsychotic prescribing and mortality in people with dementia before and during the COVID-19 pandemic: a retrospective cohort study
 
 ## Project description
-
-Description will be added here.
+This project, on behalf of the CVD-COVID-UK consortium, investigates UK antipsychotic medication prescribing trends and mortality in people with dementia. We used time series analyses to compare prescribing trends over a five year period, before and during the COVID-19 pandemic. We also used time series analyses to look at all-cause, cardiovascular and cerebrovascular disease mortality over the same period. 
 
 ## How to cite this work
 > Citation details to follow
