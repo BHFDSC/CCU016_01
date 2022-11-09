@@ -1,5 +1,5 @@
 ---
-title: "Dementia, mortality and antipsychotics"
+title: "R code for CVD-COVID-UK CCU016"
 author: "Christian Schnier (christian.schnier@ed.ac.uk)"
 date: "12/09/2022"
 output: html_document
