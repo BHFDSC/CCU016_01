@@ -1,1 +1,1 @@
-Analysis and curation code related to the analysis conducted for this project.
+Analysis and curation R code related to the analysis conducted for this project.
