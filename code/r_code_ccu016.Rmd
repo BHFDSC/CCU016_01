@@ -1,0 +1,1362 @@
+---
+title: "Dementia, mortality and antipsychotics"
+author: "Christian Schnier (christian.schnier@ed.ac.uk)"
+date: "12/09/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(RODBC)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(lubridate)
+library(knitr)
+library(survival)
+library(tsoutliers)
+library(xts)
+library(stringr)
+library(tsbox)
+library(gridExtra)
+library(tidyr)
+
+rm(list = ls())
+age=function(from, to){
+  from_lt=as.POSIXlt(from)
+  to_lt=as.POSIXlt(to)
+  
+  age=to_lt$year-from_lt$year
+  
+  ifelse(to_lt$mon<from_lt$mon |
+           (to_lt$mon==from_lt$mon & to_lt$mday<from_lt$mday),
+         age-1,age)
+}
+options(scipen=999)
+```
+## 
+
+* This is an r-script as supplement to Wilkinson, Schnier et al, 2022, Antipsychotic prescribing and mortality in people with dementia before and during the COVID-19 pandemic: a retrospective cohort study.  
+
+* This script can be adapted to analyse alzheimer's disease and vascular dementia by using a different study population 
+
+
+```{r data, include=FALSE}
+# this chunk imports the data from the SAIL database. The different data sets have been prepared in a separate sql script that can be obtained from the author upon request. 
+
+channel <- odbcConnect()### insert your connection details here
+
+
+pop1<-sqlQuery(channel,
+               "SELECT * from SAILWWMCCV.CCU016_01_COHORT_20211117
+               ")%>%
+  as_tibble()
+
+
+
+dispensedpsycho<-sqlQuery(channel,
+               "SELECT a.*, b.WOB, b.gndr_cd 
+               from SAILWWMCCV.CCU016_01_psychodrugeventsdisp_20211117 as a left join
+               SAILWWMCCV.CCU016_01_COHORT_20211117 as b
+               on a.alf_e=b.alf_e
+")%>%
+  as_tibble()
+
+
+
+dispensedbenzo<-sqlQuery(channel,
+                         "SELECT a.*, b.WOB, b.gndr_cd 
+               from SAILWWMCCV.CCU016_01_benzodrugeventsdisp_20211117 as a left join
+               SAILWWMCCV.CCU016_01_COHORT_20211117 as b
+               on a.alf_e=b.alf_e
+")%>%
+  as_tibble()
+
+prescribedpsycho<-sqlQuery(channel,
+                         "SELECT a.*, b.WOB, b.gndr_cd 
+               from SAILWWMCCV.CCU016_01_psychodrugeventspresc_20211117 as a left join
+               SAILWWMCCV.CCU016_01_COHORT_20211117 as b
+               on a.alf_e=b.alf_e
+")%>%
+  as_tibble()
+
+
+
+prescribedbenzo<-sqlQuery(channel,
+               "SELECT * from SAILWWMCCV.CCU016_benzodrugeventspresc_20211117 as a left join
+               SAILWWMCCV.CCU016_01_COHORT_20211117 as b
+               on a.alf_e=b.alf_e
+")%>%
+  as_tibble()
+
+read_lookup<-sqlQuery(channel,
+                      "select distinct READ_CODE, 
+ case when PREF_TERM_60 is null then PREF_TERM_30 else PREF_TERM_60 end as READ_DESC
+from SAILUKHDV.READ_CD_CV2_SCD
+where regexp_like(READ_CODE,'^[a-z]')
+order by READ_CODE")%>%
+  as_tibble()
+
+schizo.alf_e<-sqlQuery(channel,
+               "SELECT distinct alf_e  from SAILWWMCCV.CCU016_01_SchizophreniaEvents_20211117 a WHERE exists
+               (SELECT * FROM SAILWWMCCV.CCU016_01_COHORT_20211117 b
+               where a.alf_e=b.alf_e and a.event_dt<b.dem_dt)
+")%>%
+  as_tibble()
+
+names(pop1)<-tolower(names(pop1))
+names(prescribedpsycho)<-tolower(names(prescribedpsycho))
+names(read_lookup)<-tolower(names(read_lookup))
+names(prescribedbenzo)<-tolower(names(prescribedbenzo))
+names(schizo.alf_e)<-tolower(names(schizo.alf_e))
+
+
+odbcCloseAll()
+```
+
+```{r filter, include=FALSE}
+# removing information of people who are not part of the study population 
+
+prescribedbenzo<-prescribedbenzo%>%
+       filter(alf_e%in%pop1$alf_e)
+
+prescribedpsycho<-prescribedpsycho%>%
+       filter(alf_e%in%pop1$alf_e)
+```
+
+```{r pop, include=FALSE}
+# restructuring the data set to calculate number of people-days per months in the different age categories
+
+pop<-
+  data.frame(
+    alf_e=integer(),
+    wob=Date(),
+    gndr_cd=integer(),
+    dim.01.16=integer(),
+dim.02.16=integer(),
+dim.03.16=integer(),
+dim.04.16=integer(),
+dim.05.16=integer(),
+dim.06.16=integer(),
+dim.07.16=integer(),
+dim.08.16=integer(),
+dim.09.16=integer(),
+dim.10.16=integer(),
+dim.11.16=integer(),
+dim.12.16=integer(),
+dim.01.17=integer(),
+dim.02.17=integer(),
+dim.03.17=integer(),
+dim.04.17=integer(),
+dim.05.17=integer(),
+dim.06.17=integer(),
+dim.07.17=integer(),
+dim.08.17=integer(),
+dim.09.17=integer(),
+dim.10.17=integer(),
+dim.11.17=integer(),
+dim.12.17=integer(),
+dim.01.18=integer(),
+dim.02.18=integer(),
+dim.03.18=integer(),
+dim.04.18=integer(),
+dim.05.18=integer(),
+dim.06.18=integer(),
+dim.07.18=integer(),
+dim.08.18=integer(),
+dim.09.18=integer(),
+dim.10.18=integer(),
+dim.11.18=integer(),
+dim.12.18=integer(),
+dim.01.19=integer(),
+dim.02.19=integer(),
+dim.03.19=integer(),
+dim.04.19=integer(),
+dim.05.19=integer(),
+dim.06.19=integer(),
+dim.07.19=integer(),
+dim.08.19=integer(),
+dim.09.19=integer(),
+dim.10.19=integer(),
+dim.11.19=integer(),
+dim.12.19=integer(),
+dim.01.20=integer(),
+dim.02.20=integer(),
+dim.03.20=integer(),
+dim.04.20=integer(),
+dim.05.20=integer(),
+dim.06.20=integer(),
+dim.07.20=integer(),
+dim.08.20=integer(),
+dim.09.20=integer(),
+dim.10.20=integer(),
+dim.11.20=integer(),
+dim.12.20=integer(),
+dim.01.21=integer(),
+dim.02.21=integer(),
+dim.03.21=integer(),
+dim.04.21=integer(),
+dim.05.21=integer(),
+dim.06.21=integer(),
+dim.07.21=integer(),
+dim.08.21=integer(),
+dim.09.21=integer(),
+dim.10.21=integer(),
+dim.11.21=integer(),
+dim.12.21=integer(),
+startage=integer()
+  )%>%
+  select(alf_e, wob, gndr_cd, starts_with('dim.'),startage)
+
+
+startage<-c(60,65,70,75,80,85,90,95,100,105)
+for (x in startage)
+{
+pop2<-pop1%>%
+  mutate(
+    days1.01.16=pmax(as.Date('2016-01-01'),dem_start_dt),
+    days1.02.16=pmax(as.Date('2016-02-01'),dem_start_dt),
+    days1.03.16=pmax(as.Date('2016-03-01'),dem_start_dt),
+    days1.04.16=pmax(as.Date('2016-04-01'),dem_start_dt),
+    days1.05.16=pmax(as.Date('2016-05-01'),dem_start_dt),
+    days1.06.16=pmax(as.Date('2016-06-01'),dem_start_dt),
+    days1.07.16=pmax(as.Date('2016-07-01'),dem_start_dt),
+    days1.08.16=pmax(as.Date('2016-08-01'),dem_start_dt),
+    days1.09.16=pmax(as.Date('2016-09-01'),dem_start_dt),
+    days1.10.16=pmax(as.Date('2016-10-01'),dem_start_dt),
+    days1.11.16=pmax(as.Date('2016-11-01'),dem_start_dt),
+    days1.12.16=pmax(as.Date('2016-12-01'),dem_start_dt),
+    days1.01.17=pmax(as.Date('2017-01-01'),dem_start_dt),
+    days1.02.17=pmax(as.Date('2017-02-01'),dem_start_dt),
+    days1.03.17=pmax(as.Date('2017-03-01'),dem_start_dt),
+    days1.04.17=pmax(as.Date('2017-04-01'),dem_start_dt),
+    days1.05.17=pmax(as.Date('2017-05-01'),dem_start_dt),
+    days1.06.17=pmax(as.Date('2017-06-01'),dem_start_dt),
+    days1.07.17=pmax(as.Date('2017-07-01'),dem_start_dt),
+    days1.08.17=pmax(as.Date('2017-08-01'),dem_start_dt),
+    days1.09.17=pmax(as.Date('2017-09-01'),dem_start_dt),
+    days1.10.17=pmax(as.Date('2017-10-01'),dem_start_dt),
+    days1.11.17=pmax(as.Date('2017-11-01'),dem_start_dt),
+    days1.12.17=pmax(as.Date('2017-12-01'),dem_start_dt),
+    days1.01.18=pmax(as.Date('2018-01-01'),dem_start_dt),
+    days1.02.18=pmax(as.Date('2018-02-01'),dem_start_dt),
+    days1.03.18=pmax(as.Date('2018-03-01'),dem_start_dt),
+    days1.04.18=pmax(as.Date('2018-04-01'),dem_start_dt),
+    days1.05.18=pmax(as.Date('2018-05-01'),dem_start_dt),
+    days1.06.18=pmax(as.Date('2018-06-01'),dem_start_dt),
+    days1.07.18=pmax(as.Date('2018-07-01'),dem_start_dt),
+    days1.08.18=pmax(as.Date('2018-08-01'),dem_start_dt),
+    days1.09.18=pmax(as.Date('2018-09-01'),dem_start_dt),
+    days1.10.18=pmax(as.Date('2018-10-01'),dem_start_dt),
+    days1.11.18=pmax(as.Date('2018-11-01'),dem_start_dt),
+    days1.12.18=pmax(as.Date('2018-12-01'),dem_start_dt),
+    days1.01.19=pmax(as.Date('2019-01-01'),dem_start_dt),
+    days1.02.19=pmax(as.Date('2019-02-01'),dem_start_dt),
+    days1.03.19=pmax(as.Date('2019-03-01'),dem_start_dt),
+    days1.04.19=pmax(as.Date('2019-04-01'),dem_start_dt),
+    days1.05.19=pmax(as.Date('2019-05-01'),dem_start_dt),
+    days1.06.19=pmax(as.Date('2019-06-01'),dem_start_dt),
+    days1.07.19=pmax(as.Date('2019-07-01'),dem_start_dt),
+    days1.08.19=pmax(as.Date('2019-08-01'),dem_start_dt),
+    days1.09.19=pmax(as.Date('2019-09-01'),dem_start_dt),
+    days1.10.19=pmax(as.Date('2019-10-01'),dem_start_dt),
+    days1.11.19=pmax(as.Date('2019-11-01'),dem_start_dt),
+    days1.12.19=pmax(as.Date('2019-12-01'),dem_start_dt),
+    days1.01.20=pmax(as.Date('2020-01-01'),dem_start_dt),
+    days1.02.20=pmax(as.Date('2020-02-01'),dem_start_dt),
+    days1.03.20=pmax(as.Date('2020-03-01'),dem_start_dt),
+    days1.04.20=pmax(as.Date('2020-04-01'),dem_start_dt),
+    days1.05.20=pmax(as.Date('2020-05-01'),dem_start_dt),
+    days1.06.20=pmax(as.Date('2020-06-01'),dem_start_dt),
+    days1.07.20=pmax(as.Date('2020-07-01'),dem_start_dt),
+    days1.08.20=pmax(as.Date('2020-08-01'),dem_start_dt),
+    days1.09.20=pmax(as.Date('2020-09-01'),dem_start_dt),
+    days1.10.20=pmax(as.Date('2020-10-01'),dem_start_dt),
+    days1.11.20=pmax(as.Date('2020-11-01'),dem_start_dt),
+    days1.12.20=pmax(as.Date('2020-12-01'),dem_start_dt),
+    days1.01.21=pmax(as.Date('2021-01-01'),dem_start_dt),
+    days1.02.21=pmax(as.Date('2021-02-01'),dem_start_dt),
+    days1.03.21=pmax(as.Date('2021-03-01'),dem_start_dt),
+    days1.04.21=pmax(as.Date('2021-04-01'),dem_start_dt),
+    days1.05.21=pmax(as.Date('2021-05-01'),dem_start_dt),
+    days1.06.21=pmax(as.Date('2021-06-01'),dem_start_dt),
+    days1.07.21=pmax(as.Date('2021-07-01'),dem_start_dt),
+    days1.08.21=pmax(as.Date('2021-08-01'),dem_start_dt),
+    days1.09.21=pmax(as.Date('2021-09-01'),dem_start_dt),
+    days1.10.21=pmax(as.Date('2021-10-01'),dem_start_dt),
+    days1.11.21=pmax(as.Date('2021-11-01'),dem_start_dt),
+    days1.12.21=pmax(as.Date('2021-12-01'),dem_start_dt),
+    days2.01.16=pmin(ceiling_date(as.Date('2016-01-01'),'month'),end_dt),
+    days2.02.16=pmin(ceiling_date(as.Date('2016-02-01'),'month'),end_dt),
+    days2.03.16=pmin(ceiling_date(as.Date('2016-03-01'),'month'),end_dt),
+    days2.04.16=pmin(ceiling_date(as.Date('2016-04-01'),'month'),end_dt),
+    days2.05.16=pmin(ceiling_date(as.Date('2016-05-01'),'month'),end_dt),
+    days2.06.16=pmin(ceiling_date(as.Date('2016-06-01'),'month'),end_dt),
+    days2.07.16=pmin(ceiling_date(as.Date('2016-07-01'),'month'),end_dt),
+    days2.08.16=pmin(ceiling_date(as.Date('2016-08-01'),'month'),end_dt),
+    days2.09.16=pmin(ceiling_date(as.Date('2016-09-01'),'month'),end_dt),
+    days2.10.16=pmin(ceiling_date(as.Date('2016-10-01'),'month'),end_dt),
+    days2.11.16=pmin(ceiling_date(as.Date('2016-11-01'),'month'),end_dt),
+    days2.12.16=pmin(ceiling_date(as.Date('2016-12-01'),'month'),end_dt),
+    days2.01.17=pmin(ceiling_date(as.Date('2017-01-01'),'month'),end_dt),
+    days2.02.17=pmin(ceiling_date(as.Date('2017-02-01'),'month'),end_dt),
+    days2.03.17=pmin(ceiling_date(as.Date('2017-03-01'),'month'),end_dt),
+    days2.04.17=pmin(ceiling_date(as.Date('2017-04-01'),'month'),end_dt),
+    days2.05.17=pmin(ceiling_date(as.Date('2017-05-01'),'month'),end_dt),
+    days2.06.17=pmin(ceiling_date(as.Date('2017-06-01'),'month'),end_dt),
+    days2.07.17=pmin(ceiling_date(as.Date('2017-07-01'),'month'),end_dt),
+    days2.08.17=pmin(ceiling_date(as.Date('2017-08-01'),'month'),end_dt),
+    days2.09.17=pmin(ceiling_date(as.Date('2017-09-01'),'month'),end_dt),
+    days2.10.17=pmin(ceiling_date(as.Date('2017-10-01'),'month'),end_dt),
+    days2.11.17=pmin(ceiling_date(as.Date('2017-11-01'),'month'),end_dt),
+    days2.12.17=pmin(ceiling_date(as.Date('2017-12-01'),'month'),end_dt),
+    days2.01.18=pmin(ceiling_date(as.Date('2018-01-01'),'month'),end_dt),
+    days2.02.18=pmin(ceiling_date(as.Date('2018-02-01'),'month'),end_dt),
+    days2.03.18=pmin(ceiling_date(as.Date('2018-03-01'),'month'),end_dt),
+    days2.04.18=pmin(ceiling_date(as.Date('2018-04-01'),'month'),end_dt),
+    days2.05.18=pmin(ceiling_date(as.Date('2018-05-01'),'month'),end_dt),
+    days2.06.18=pmin(ceiling_date(as.Date('2018-06-01'),'month'),end_dt),
+    days2.07.18=pmin(ceiling_date(as.Date('2018-07-01'),'month'),end_dt),
+    days2.08.18=pmin(ceiling_date(as.Date('2018-08-01'),'month'),end_dt),
+    days2.09.18=pmin(ceiling_date(as.Date('2018-09-01'),'month'),end_dt),
+    days2.10.18=pmin(ceiling_date(as.Date('2018-10-01'),'month'),end_dt),
+    days2.11.18=pmin(ceiling_date(as.Date('2018-11-01'),'month'),end_dt),
+    days2.12.18=pmin(ceiling_date(as.Date('2018-12-01'),'month'),end_dt),
+    days2.01.19=pmin(ceiling_date(as.Date('2019-01-01'),'month'),end_dt),
+    days2.02.19=pmin(ceiling_date(as.Date('2019-02-01'),'month'),end_dt),
+    days2.03.19=pmin(ceiling_date(as.Date('2019-03-01'),'month'),end_dt),
+    days2.04.19=pmin(ceiling_date(as.Date('2019-04-01'),'month'),end_dt),
+    days2.05.19=pmin(ceiling_date(as.Date('2019-05-01'),'month'),end_dt),
+    days2.06.19=pmin(ceiling_date(as.Date('2019-06-01'),'month'),end_dt),
+    days2.07.19=pmin(ceiling_date(as.Date('2019-07-01'),'month'),end_dt),
+    days2.08.19=pmin(ceiling_date(as.Date('2019-08-01'),'month'),end_dt),
+    days2.09.19=pmin(ceiling_date(as.Date('2019-09-01'),'month'),end_dt),
+    days2.10.19=pmin(ceiling_date(as.Date('2019-10-01'),'month'),end_dt),
+    days2.11.19=pmin(ceiling_date(as.Date('2019-11-01'),'month'),end_dt),
+    days2.12.19=pmin(ceiling_date(as.Date('2019-12-01'),'month'),end_dt),
+    days2.01.20=pmin(ceiling_date(as.Date('2020-01-01'),'month'),end_dt),
+    days2.02.20=pmin(ceiling_date(as.Date('2020-02-01'),'month'),end_dt),
+    days2.03.20=pmin(ceiling_date(as.Date('2020-03-01'),'month'),end_dt),
+    days2.04.20=pmin(ceiling_date(as.Date('2020-04-01'),'month'),end_dt),
+    days2.05.20=pmin(ceiling_date(as.Date('2020-05-01'),'month'),end_dt),
+    days2.06.20=pmin(ceiling_date(as.Date('2020-06-01'),'month'),end_dt),
+    days2.07.20=pmin(ceiling_date(as.Date('2020-07-01'),'month'),end_dt),
+    days2.08.20=pmin(ceiling_date(as.Date('2020-08-01'),'month'),end_dt),
+    days2.09.20=pmin(ceiling_date(as.Date('2020-09-01'),'month'),end_dt),
+    days2.10.20=pmin(ceiling_date(as.Date('2020-10-01'),'month'),end_dt),
+    days2.11.20=pmin(ceiling_date(as.Date('2020-11-01'),'month'),end_dt),
+    days2.12.20=pmin(ceiling_date(as.Date('2020-12-01'),'month'),end_dt),
+    days2.01.21=pmin(ceiling_date(as.Date('2021-01-01'),'month'),end_dt),
+    days2.02.21=pmin(ceiling_date(as.Date('2021-02-01'),'month'),end_dt),
+    days2.03.21=pmin(ceiling_date(as.Date('2021-03-01'),'month'),end_dt),
+    days2.04.21=pmin(ceiling_date(as.Date('2021-04-01'),'month'),end_dt),
+    days2.05.21=pmin(ceiling_date(as.Date('2021-05-01'),'month'),end_dt),
+    days2.06.21=pmin(ceiling_date(as.Date('2021-06-01'),'month'),end_dt),
+    days2.07.21=pmin(ceiling_date(as.Date('2021-07-01'),'month'),end_dt),
+    days2.08.21=pmin(ceiling_date(as.Date('2021-08-01'),'month'),end_dt),
+    days2.09.21=pmin(ceiling_date(as.Date('2021-09-01'),'month'),end_dt),
+    days2.10.21=pmin(ceiling_date(as.Date('2021-10-01'),'month'),end_dt),
+    days2.11.21=pmin(ceiling_date(as.Date('2021-11-01'),'month'),end_dt),
+    days2.12.21=pmin(ceiling_date(as.Date('2021-12-01'),'month'),end_dt)
+    )%>%
+    mutate(
+dim.01.16=ifelse(between(age(wob,as.Date('2016-01-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.01.16,days1.01.16,units='days'))),0),
+dim.02.16=ifelse(between(age(wob,as.Date('2016-02-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.02.16,days1.02.16,units='days'))),0),
+dim.03.16=ifelse(between(age(wob,as.Date('2016-03-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.03.16,days1.03.16,units='days'))),0),
+dim.04.16=ifelse(between(age(wob,as.Date('2016-04-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.04.16,days1.04.16,units='days'))),0),
+dim.05.16=ifelse(between(age(wob,as.Date('2016-05-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.05.16,days1.05.16,units='days'))),0),
+dim.06.16=ifelse(between(age(wob,as.Date('2016-06-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.06.16,days1.06.16,units='days'))),0),
+dim.07.16=ifelse(between(age(wob,as.Date('2016-07-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.07.16,days1.07.16,units='days'))),0),
+dim.08.16=ifelse(between(age(wob,as.Date('2016-08-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.08.16,days1.08.16,units='days'))),0),
+dim.09.16=ifelse(between(age(wob,as.Date('2016-09-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.09.16,days1.09.16,units='days'))),0),
+dim.10.16=ifelse(between(age(wob,as.Date('2016-10-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.10.16,days1.10.16,units='days'))),0),
+dim.11.16=ifelse(between(age(wob,as.Date('2016-11-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.11.16,days1.11.16,units='days'))),0),
+dim.12.16=ifelse(between(age(wob,as.Date('2016-12-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.12.16,days1.12.16,units='days'))),0),
+dim.01.17=ifelse(between(age(wob,as.Date('2017-01-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.01.17,days1.01.17,units='days'))),0),
+dim.02.17=ifelse(between(age(wob,as.Date('2017-02-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.02.17,days1.02.17,units='days'))),0),
+dim.03.17=ifelse(between(age(wob,as.Date('2017-03-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.03.17,days1.03.17,units='days'))),0),
+dim.04.17=ifelse(between(age(wob,as.Date('2017-04-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.04.17,days1.04.17,units='days'))),0),
+dim.05.17=ifelse(between(age(wob,as.Date('2017-05-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.05.17,days1.05.17,units='days'))),0),
+dim.06.17=ifelse(between(age(wob,as.Date('2017-06-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.06.17,days1.06.17,units='days'))),0),
+dim.07.17=ifelse(between(age(wob,as.Date('2017-07-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.07.17,days1.07.17,units='days'))),0),
+dim.08.17=ifelse(between(age(wob,as.Date('2017-08-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.08.17,days1.08.17,units='days'))),0),
+dim.09.17=ifelse(between(age(wob,as.Date('2017-09-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.09.17,days1.09.17,units='days'))),0),
+dim.10.17=ifelse(between(age(wob,as.Date('2017-10-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.10.17,days1.10.17,units='days'))),0),
+dim.11.17=ifelse(between(age(wob,as.Date('2017-11-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.11.17,days1.11.17,units='days'))),0),
+dim.12.17=ifelse(between(age(wob,as.Date('2017-12-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.12.17,days1.12.17,units='days'))),0),
+dim.01.18=ifelse(between(age(wob,as.Date('2018-01-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.01.18,days1.01.18,units='days'))),0),
+dim.02.18=ifelse(between(age(wob,as.Date('2018-02-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.02.18,days1.02.18,units='days'))),0),
+dim.03.18=ifelse(between(age(wob,as.Date('2018-03-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.03.18,days1.03.18,units='days'))),0),
+dim.04.18=ifelse(between(age(wob,as.Date('2018-04-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.04.18,days1.04.18,units='days'))),0),
+dim.05.18=ifelse(between(age(wob,as.Date('2018-05-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.05.18,days1.05.18,units='days'))),0),
+dim.06.18=ifelse(between(age(wob,as.Date('2018-06-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.06.18,days1.06.18,units='days'))),0),
+dim.07.18=ifelse(between(age(wob,as.Date('2018-07-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.07.18,days1.07.18,units='days'))),0),
+dim.08.18=ifelse(between(age(wob,as.Date('2018-08-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.08.18,days1.08.18,units='days'))),0),
+dim.09.18=ifelse(between(age(wob,as.Date('2018-09-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.09.18,days1.09.18,units='days'))),0),
+dim.10.18=ifelse(between(age(wob,as.Date('2018-10-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.10.18,days1.10.18,units='days'))),0),
+dim.11.18=ifelse(between(age(wob,as.Date('2018-11-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.11.18,days1.11.18,units='days'))),0),
+dim.12.18=ifelse(between(age(wob,as.Date('2018-12-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.12.18,days1.12.18,units='days'))),0),
+dim.01.19=ifelse(between(age(wob,as.Date('2019-01-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.01.19,days1.01.19,units='days'))),0),
+dim.02.19=ifelse(between(age(wob,as.Date('2019-02-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.02.19,days1.02.19,units='days'))),0),
+dim.03.19=ifelse(between(age(wob,as.Date('2019-03-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.03.19,days1.03.19,units='days'))),0),
+dim.04.19=ifelse(between(age(wob,as.Date('2019-04-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.04.19,days1.04.19,units='days'))),0),
+dim.05.19=ifelse(between(age(wob,as.Date('2019-05-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.05.19,days1.05.19,units='days'))),0),
+dim.06.19=ifelse(between(age(wob,as.Date('2019-06-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.06.19,days1.06.19,units='days'))),0),
+dim.07.19=ifelse(between(age(wob,as.Date('2019-07-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.07.19,days1.07.19,units='days'))),0),
+dim.08.19=ifelse(between(age(wob,as.Date('2019-08-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.08.19,days1.08.19,units='days'))),0),
+dim.09.19=ifelse(between(age(wob,as.Date('2019-09-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.09.19,days1.09.19,units='days'))),0),
+dim.10.19=ifelse(between(age(wob,as.Date('2019-10-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.10.19,days1.10.19,units='days'))),0),
+dim.11.19=ifelse(between(age(wob,as.Date('2019-11-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.11.19,days1.11.19,units='days'))),0),
+dim.12.19=ifelse(between(age(wob,as.Date('2019-12-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.12.19,days1.12.19,units='days'))),0),
+dim.01.20=ifelse(between(age(wob,as.Date('2020-01-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.01.20,days1.01.20,units='days'))),0),
+dim.02.20=ifelse(between(age(wob,as.Date('2020-02-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.02.20,days1.02.20,units='days'))),0),
+dim.03.20=ifelse(between(age(wob,as.Date('2020-03-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.03.20,days1.03.20,units='days'))),0),
+dim.04.20=ifelse(between(age(wob,as.Date('2020-04-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.04.20,days1.04.20,units='days'))),0),
+dim.05.20=ifelse(between(age(wob,as.Date('2020-05-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.05.20,days1.05.20,units='days'))),0),
+dim.06.20=ifelse(between(age(wob,as.Date('2020-06-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.06.20,days1.06.20,units='days'))),0),
+dim.07.20=ifelse(between(age(wob,as.Date('2020-07-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.07.20,days1.07.20,units='days'))),0),
+dim.08.20=ifelse(between(age(wob,as.Date('2020-08-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.08.20,days1.08.20,units='days'))),0),
+dim.09.20=ifelse(between(age(wob,as.Date('2020-09-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.09.20,days1.09.20,units='days'))),0),
+dim.10.20=ifelse(between(age(wob,as.Date('2020-10-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.10.20,days1.10.20,units='days'))),0),
+dim.11.20=ifelse(between(age(wob,as.Date('2020-11-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.11.20,days1.11.20,units='days'))),0),
+dim.12.20=ifelse(between(age(wob,as.Date('2020-12-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.12.20,days1.12.20,units='days'))),0),
+dim.01.21=ifelse(between(age(wob,as.Date('2021-01-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.01.21,days1.01.21,units='days'))),0),
+dim.02.21=ifelse(between(age(wob,as.Date('2021-02-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.02.21,days1.02.21,units='days'))),0),
+dim.03.21=ifelse(between(age(wob,as.Date('2021-03-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.03.21,days1.03.21,units='days'))),0),
+dim.04.21=ifelse(between(age(wob,as.Date('2021-04-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.04.21,days1.04.21,units='days'))),0),
+dim.05.21=ifelse(between(age(wob,as.Date('2021-05-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.05.21,days1.05.21,units='days'))),0),
+dim.06.21=ifelse(between(age(wob,as.Date('2021-06-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.06.21,days1.06.21,units='days'))),0),
+dim.07.21=ifelse(between(age(wob,as.Date('2021-07-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.07.21,days1.07.21,units='days'))),0),
+dim.08.21=ifelse(between(age(wob,as.Date('2021-08-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.08.21,days1.08.21,units='days'))),0),
+dim.09.21=ifelse(between(age(wob,as.Date('2021-09-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.09.21,days1.09.21,units='days'))),0),
+dim.10.21=ifelse(between(age(wob,as.Date('2021-10-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.10.21,days1.10.21,units='days'))),0),
+dim.11.21=ifelse(between(age(wob,as.Date('2021-11-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.11.21,days1.11.21,units='days'))),0),
+dim.12.21=ifelse(between(age(wob,as.Date('2021-12-01')),x,x+4)==TRUE,pmax(0,as.numeric(difftime(days2.12.21,days1.12.21,units='days'))),0),
+startage=x
+
+    )  
+     
+pop<-pop%>%
+  bind_rows(pop2%>%
+              select(alf_e, wob, gndr_cd, starts_with('dim.'),startage))
+}
+ 
+dimsum<-data.frame(t(pop%>%
+  select(startage,starts_with('dim'))%>%
+    group_by(startage)%>%
+  summarise_all(sum)))
+
+
+dimsum<-dimsum%>%filter(X1>1000)%>%
+  mutate(X8=X8+X9+X10)%>%
+  select(-X10,-X9)
+dimsum$time<-row.names(dimsum)
+
+dimsum<-gather(dimsum,agegroup,persondays,X1:X8)
+
+dimsum<-dimsum%>%
+  mutate(year=as.numeric(substring(time,8,9))+2000,
+         month=as.numeric(substring(time,5,6)))
+
+
+dimsum<-dimsum%>%
+  mutate(agegroup=case_when(agegroup=='X1'~'60-64',
+                            agegroup=='X2'~'65-69',
+                            agegroup=='X3'~'70-74',
+                            agegroup=='X4'~'75-79',
+                            agegroup=='X5'~'80-84',
+                            agegroup=='X6'~'85-89',
+                            agegroup=='X7'~'90-94',
+                            agegroup=='X8'~'95+'
+                            )) 
+
+dimsum.ts<-dimsum%>%  
+  mutate(x=as.Date(paste(as.character(year),as.character(month),'01',sep='-')))
+
+col<-c('#864962','#8cc300','#dd0075','#30ac79','#ff2a2f','#00d4f1','#c28f00','#003a49')
+
+#### only once, save the standard population for later use ####
+#death.std<-dimsum%>%
+#  filter(year==2020,month==1)%>%
+#  rename(standard.days=persondays)%>%
+#  select(agegroup,standard.days)
+#saveRDS(death.std,file='S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\script\\standardpopulation')
+##############
+
+```
+
+
+```{r dimfif, echo=FALSE,fig.cap='Monthly days at risk of people with dementia'}
+
+ggplot(dimsum.ts,aes(x=x,y=persondays,colour=agegroup))+geom_line(aes(group=agegroup))+labs(x='Year',y='Person-days/month')+scale_colour_manual(values=col)
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\atriskperiod.pdf',width=16,height=6,units='cm')
+
+
+#ggplot(dimsum.perc,aes(x=x,y=prop))+geom_line()+labs(x='Year',y='Percentage with dementia/month')
+
+
+```
+
+```{r all cause, include=FALSE}
+### adding number of deaths (total and case specific) in the different age categories
+
+ death1.all<-pop1%>%
+  filter(is.na(dod_dt)==FALSE)%>%
+   mutate(month=month(dod_dt),
+          year=year(dod_dt),
+          agegroup=case_when(between(age(wob,dod_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,dod_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,dod_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,dod_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,dod_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,dod_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,dod_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,dod_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,dod_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,dod_dt),95,120)==TRUE~'95+'
+                             ))%>%
+   filter(dod_dt<as.Date('2021-07-01'))%>%
+   group_by(year,month,agegroup)%>%
+   summarise(deaths=n())
+
+ death1.stroke.underlying<-pop1%>%
+  filter(is.na(dod_dt)==FALSE)%>%
+  filter(stroke_death>1)%>%
+   mutate(month=month(dod_dt),
+          year=year(dod_dt),
+          agegroup=case_when(between(age(wob,dod_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,dod_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,dod_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,dod_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,dod_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,dod_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,dod_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,dod_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,dod_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,dod_dt),95,120)==TRUE~'95+'))%>%
+   filter(dod_dt<as.Date('2021-07-01'))%>%
+   group_by(year,month,agegroup)%>%
+   summarise(deaths=n())
+ 
+ death1.stroke.any<-pop1%>%
+  filter(is.na(dod_dt)==FALSE)%>%
+  filter(stroke_death>0)%>%
+   mutate(month=month(dod_dt),
+          year=year(dod_dt),
+          agegroup=case_when(between(age(wob,dod_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,dod_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,dod_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,dod_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,dod_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,dod_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,dod_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,dod_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,dod_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,dod_dt),95,120)==TRUE~'95+'))%>%
+   filter(dod_dt<as.Date('2021-07-01'))%>%
+   group_by(year,month,agegroup)%>%
+   summarise(deaths=n())
+ 
+ death1.mi.underlying<-pop1%>%
+  filter(is.na(dod_dt)==FALSE)%>%
+  filter(mi_death>1)%>%# underlying MI
+   mutate(month=month(dod_dt),
+          year=year(dod_dt),
+          agegroup=case_when(between(age(wob,dod_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,dod_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,dod_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,dod_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,dod_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,dod_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,dod_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,dod_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,dod_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,dod_dt),95,120)==TRUE~'95+'))%>%
+   filter(dod_dt<as.Date('2021-07-01'))%>%
+   group_by(year,month,agegroup)%>%
+   summarise(deaths=n())
+ 
+ death1.mi.any<-pop1%>%
+  filter(is.na(dod_dt)==FALSE)%>%
+  filter(mi_death>0)%>%# any Mi
+   mutate(month=month(dod_dt),
+          year=year(dod_dt),
+          agegroup=case_when(between(age(wob,dod_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,dod_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,dod_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,dod_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,dod_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,dod_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,dod_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,dod_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,dod_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,dod_dt),95,120)==TRUE~'95+'))%>%
+   filter(dod_dt<as.Date('2021-07-01'))%>%
+   group_by(year,month,agegroup)%>%
+   summarise(deaths=n())
+
+ #create emtpy data frame
+ death4<-data.frame(
+   time=character(),
+   month=integer(),
+   year=integer(),
+   deaths=numeric(),
+   persondays=integer(),
+   personmonths=integer(),
+   rate.per.10000pm=numeric(),
+   x=as.Date(character()),
+   agegroup=character(),
+   outcome=character()
+ )
+ 
+df<-list(death1.all,death1.stroke.underlying,death1.stroke.any,death1.mi.underlying,death1.mi.any)
+var=c('all','stroke underlying','stroke any','mi underlying','mi any')
+for(i in 1:5)
+{
+death2<-dimsum%>%
+  left_join(df[[i]])%>%
+  replace_na(list(deaths=0))%>%
+  mutate(personmonths=persondays/30,
+         rate.per.10000pm=round(deaths/(personmonths)*10000,2))%>%
+  filter((year*100+month)<202107)%>%
+  mutate(x=as.Date(paste(as.character(year),as.character(month),'01',sep='-')))
+
+###adding an age-standardized estimate
+
+
+
+death.stand<-death2%>%
+  left_join(
+death2%>%
+  filter(time=='dim.01.20')%>%
+  rename(standard.days=persondays)%>%
+  select(agegroup,standard.days))%>%
+  mutate(pred.deaths=deaths/persondays*standard.days)%>%
+  group_by(time,month,year)%>%
+  summarise(deaths=sum(pred.deaths),persondays=sum(standard.days))%>%
+  mutate(personmonths=persondays/30,
+         rate.per.10000pm=round(deaths/(personmonths)*10000,2),
+         x=as.Date(paste(as.character(year),as.character(month),'01',sep='-')),
+         agegroup='zAge standandardized')
+
+death3<-death2%>%
+  bind_rows(death.stand)%>%
+  mutate(outcome=var[i])
+
+death4<-death4%>%
+  bind_rows(death3)
+  
+}
+death4<-death4%>%
+  mutate(mortality=word(outcome,1))
+
+
+
+col<-c('#800500','#86ffde','#300085','#004427','#003488','#ffb9de')
+
+plot1<-ggplot(subset(death4,mortality=='all'&agegroup!='zAge standandardized'),aes(x=x,y=rate.per.10000pm, colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+
+plot2<-ggplot(subset(death4,mortality=='stroke'&!agegroup%in%(c('zAge standandardized','60-64','65-69'))),aes(x=x,y=rate.per.10000pm, colour=outcome))+geom_line(aes(group=outcome), show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+
+plot3<-ggplot(subset(death4,mortality=='mi'&!agegroup%in%(c('zAge standandardized','60-64','65-69'))),aes(x=x,y=rate.per.10000pm, colour=outcome))+geom_line(aes(group=outcome), show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+
+
+plot4<-ggplot(subset(death4,agegroup=='zAge standandardized'),aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome))+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(mortality),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+scale_colour_manual(values=col)
+
+
+
+```
+
+```{r, echo=FALSE,fig.cap='Mortality'}
+plot1
+```
+
+```{r, echo=FALSE,fig.cap='Stroke mortality'}
+plot2
+```
+
+```{r, echo=FALSE,fig.cap='MI mortality'}
+plot3
+```
+
+```{r mortalityfig2, echo=FALSE,fig.cap='Mortality, Age standardized'}
+plot4
+```
+
+```{r, echo=FALSE,fig.cap='Any death, all cause',eval=TRUE}
+#calculating time series and outlier detection
+
+
+pop.ts.rate<-death4%>%
+                  filter(agegroup=='zAge standandardized'&outcome=='all')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r Any death additive, echo=FALSE}
+autoplot(pop.ts.rate.a.decomp)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_anydeath.pdf',width=8,height=6,units='cm')
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+
+```
+
+```{r Any death multiplicative, echo=FALSE,fig.cap='Any death, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r Any death outlier, echo=FALSE,fig.cap='Any death, outliers'}
+print(tso.pop.ts.rate)
+```
+
+
+```{r, echo=FALSE,eval=TRUE}
+
+
+
+pop.ts.rate<-death4%>%
+                  filter(agegroup=='zAge standandardized'&outcome=='mi any')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r MI any additive, echo=FALSE,fig.cap='Mi any death, additive'}
+autoplot(pop.ts.rate.a.decomp)
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_mideath.pdf',width=8,height=6,units='cm')
+```
+
+```{r MI any multiplicative, echo=FALSE,fig.cap='Mi any death, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r MI any outlier, echo=FALSE,fig.cap='Mi any death, outliers'}
+print(tso.pop.ts.rate)
+```
+
+```{r, echo=FALSE,fig.cap='MI mortality, underlying cause',eval=TRUE}
+
+
+
+pop.ts.rate<-death4%>%
+                  filter(agegroup=='zAge standandardized'&outcome=='mi underlying')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r MI underlying additive, echo=FALSE}
+autoplot(pop.ts.rate.a.decomp)
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_miunderlyingdeath.pdf',width=8,height=6,units='cm')
+```
+
+```{r MI underlying multiplicative, echo=FALSE,fig.cap='Mi underlying death, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r MI underlying outlier, echo=FALSE,fig.cap='Mi underlying death, outliers'}
+print(tso.pop.ts.rate)
+```
+
+
+```{r, echo=FALSE,fig.cap='Stroke mortality, all cause',eval=TRUE}
+
+
+
+pop.ts.rate<-death4%>%
+                  filter(agegroup=='zAge standandardized'&outcome=='stroke any')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r stroke any additive, echo=FALSE}
+autoplot(pop.ts.rate.a.decomp)
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_strokedeath.pdf',width=8,height=6,units='cm')
+```
+
+```{r stroke any multiplicative, echo=FALSE,fig.cap='stroke any death, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r stroke any outlier, echo=FALSE,fig.cap='stroke any death, outliers'}
+print(tso.pop.ts.rate)
+```
+
+```{r, echo=FALSE,fig.cap='stroke mortality, underlying cause',eval=TRUE}
+
+
+
+pop.ts.rate<-death4%>%
+                  filter(agegroup=='zAge standandardized'&outcome=='stroke underlying')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r stroke underlying additive, echo=FALSE}
+autoplot(pop.ts.rate.a.decomp)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_strokeunderlyingdeath.pdf',width=8,height=6,units='cm')
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+```
+
+```{r stroke underlying multiplicative, echo=FALSE,fig.cap='stroke underlying death, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r stroke underlying outlier, echo=FALSE,fig.cap='stroke underlying death, outliers'}
+print(tso.pop.ts.rate)
+
+```
+
+
+```{r prescribed, include=FALSE}
+#adding use of antipsychotics
+
+#any anti-psychotic
+ prescribed2.any<-prescribedpsycho%>%
+   mutate(drug=substring(event_cd,1,3),
+          month=month(event_dt),
+          year=year(event_dt),
+          agegroup=case_when(between(age(wob,event_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,event_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,event_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,event_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,event_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,event_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,event_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,event_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,event_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,event_dt),95,120)==TRUE~'95+'))%>%
+   filter(event_dt<as.Date('2021-07-01'))%>%
+   group_by(alf_e,year,month,agegroup)%>%
+   mutate(m=row_number())%>%
+   filter(m==1)%>%
+   select(-m)%>%
+   ungroup()%>%
+   group_by(year,month,agegroup)%>%
+   summarise(prescriptions=n())
+
+ prescribed2.risp<-prescribedpsycho%>%
+  filter(substring(event_cd,1,3)=='d4p')%>%
+   mutate(drug=substring(event_cd,1,4),
+          month=month(event_dt),
+          year=year(event_dt),
+          agegroup=case_when(between(age(wob,event_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,event_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,event_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,event_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,event_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,event_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,event_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,event_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,event_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,event_dt),95,120)==TRUE~'95+'))%>%
+   filter(event_dt<as.Date('2021-07-01'))%>%
+   group_by(alf_e,year,month,agegroup)%>%
+   mutate(m=row_number())%>%
+   filter(m==1)%>%
+   select(-m)%>%
+   ungroup()%>%
+   group_by(year,month,agegroup)%>%
+   summarise(prescriptions=n())
+ 
+  prescribed2.quet<-prescribedpsycho%>%
+ filter(substring(event_cd,1,3)=='d4s')%>%
+   mutate(drug=substring(event_cd,1,4),
+          month=month(event_dt),
+          year=year(event_dt),
+          agegroup=case_when(between(age(wob,event_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,event_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,event_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,event_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,event_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,event_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,event_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,event_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,event_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,event_dt),95,120)==TRUE~'95+'))%>%
+   filter(event_dt<as.Date('2021-07-01'))%>%
+   group_by(alf_e,year,month,agegroup)%>%
+   mutate(m=row_number())%>%
+   filter(m==1)%>%
+   select(-m)%>%
+   ungroup()%>%
+   group_by(year,month,agegroup)%>%
+   summarise(prescriptions=n())
+  
+   prescribed2.olan<-prescribedpsycho%>%
+  filter(substring(event_cd,1,3)=='d4r')%>%
+   mutate(drug=substring(event_cd,1,4),
+          month=month(event_dt),
+          year=year(event_dt),
+          agegroup=case_when(between(age(wob,event_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,event_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,event_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,event_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,event_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,event_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,event_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,event_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,event_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,event_dt),95,120)==TRUE~'95+'))%>%
+   filter(event_dt<as.Date('2021-07-01'))%>%
+   group_by(alf_e,year,month,agegroup)%>%
+   mutate(m=row_number())%>%
+   filter(m==1)%>%
+   select(-m)%>%
+   ungroup()%>%
+   group_by(year,month,agegroup)%>%
+   summarise(prescriptions=n())
+   
+prescribed2.benzo<-prescribedbenzo%>%
+   mutate(drug=substring(event_cd,1,4),
+          month=month(event_dt),
+          year=year(event_dt),
+          agegroup=case_when(between(age(wob,event_dt),50,54)==TRUE~'50-54',
+                             between(age(wob,event_dt),55,59)==TRUE~'55-59',
+                             between(age(wob,event_dt),60,64)==TRUE~'60-64',
+                             between(age(wob,event_dt),65,69)==TRUE~'65-69',
+                             between(age(wob,event_dt),70,74)==TRUE~'70-74',
+                             between(age(wob,event_dt),75,79)==TRUE~'75-79',
+                             between(age(wob,event_dt),80,84)==TRUE~'80-84',
+                             between(age(wob,event_dt),85,89)==TRUE~'85-89',
+                             between(age(wob,event_dt),90,94)==TRUE~'90-94',
+                             between(age(wob,event_dt),95,120)==TRUE~'95+'))%>%
+   filter(event_dt<as.Date('2021-07-01'))%>%
+   group_by(alf_e,year,month,agegroup)%>%
+   mutate(m=row_number())%>%
+   filter(m==1)%>%
+   select(-m)%>%
+   ungroup()%>%
+   group_by(year,month,agegroup)%>%
+   summarise(prescriptions=n())
+   
+  
+ #create emtpy data frame
+ prescribed<-data.frame(
+   time=character(),
+   agegroup=character(),
+   persondays=integer(),
+   year=integer(),
+   month=integer(),
+   prescriptions=numeric(),
+   personmonths=integer(),
+   rate.per.10000pm=numeric(),
+   x=as.Date(character()),
+   drugclass=character()
+ )
+  
+
+df<-list(prescribed2.any,prescribed2.risp,prescribed2.quet,prescribed2.olan,prescribed2.benzo)
+var=c('all','Risperidone','Quetiapine','Olanzapine','Benzodiazepine')
+
+for(i in 1:5)
+{
+prescribed3<-dimsum%>%
+  left_join(df[[i]])%>%
+  replace_na(list(prescriptions=0))%>%
+  mutate(personmonths=persondays/30,
+         rate.per.10000pm=round(prescriptions/(personmonths)*10000,2))%>%
+  filter((year*100+month)<202107)%>%
+  mutate(x=as.Date(paste(as.character(year),as.character(month),'01',sep='-')))   
+ 
+
+
+
+###adding an age-standardized estimate
+  
+disp.stand<-prescribed3%>%
+  left_join(
+prescribed3%>%
+  filter(time=='dim.01.20')%>%
+  rename(standard.days=persondays)%>%
+  select(agegroup,standard.days))%>%
+  mutate(pred.prescriptions=prescriptions/persondays*standard.days)%>%
+  group_by(time,month,year)%>%
+  summarise(prescriptions=sum(pred.prescriptions),persondays=sum(standard.days))%>%
+  mutate(personmonths=persondays/30,
+         rate.per.10000pm=round(prescriptions/(personmonths)*10000,0),
+         x=as.Date(paste(as.character(year),as.character(month),'01',sep='-')),
+         agegroup='zAge standandardized')
+
+prescribed3.psycho<-prescribed3%>%
+  bind_rows(disp.stand)%>%
+  mutate(drugclass=var[i]
+        )
+prescribed<-prescribed%>%
+  bind_rows(prescribed3.psycho)
+}
+
+
+
+plot1e<-ggplot(subset(prescribed,drugclass=='all'&agegroup!='zAge standandardized'),aes(x=x,y=rate.per.10000pm))+geom_line()+labs(x='Year',y='Prescriptions per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+plot2e<-ggplot(subset(prescribed,drugclass  =='Olanzapine'&agegroup!='zAge standandardized'),aes(x=x,y=rate.per.10000pm))+geom_line()+labs(x='Year',y='Prescriptions per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+plot3e<-ggplot(subset(prescribed,drugclass=='Quetiapine'&agegroup!='zAge standandardized'),aes(x=x,y=rate.per.10000pm))+geom_line()+labs(x='Year',y='Prescriptions per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+plot4e<-ggplot(subset(prescribed,drugclass=='Risperidone'&agegroup!='zAge standandardized'),aes(x=x,y=rate.per.10000pm))+geom_line()+labs(x='Year',y='Prescriptions per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+plot5e<-ggplot(subset(prescribed,drugclass=='Benzodiazepine'&agegroup!='zAge standandardized'),aes(x=x,y=rate.per.10000pm))+geom_line()+labs(x='Year',y='Prescriptions per 10,000 person-month')+facet_grid(vars(agegroup))+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')
+
+plot6e<-ggplot(subset(prescribed,agegroup=='zAge standandardized'),aes(x=x,y=rate.per.10000pm,colour=drugclass))+geom_line(aes(group=drugclass))+labs(x='Year',y='Prescriptions per 10,000 person-month')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+scale_colour_manual(values=col)
+
+
+
+combined<-
+death4%>%
+  rename(var=mortality)%>%
+  select(x,rate.per.10000pm,outcome,var,agegroup)%>%
+  bind_rows(prescribed%>%
+    rename(outcome=drugclass)%>%
+    mutate(var='zdrug')%>%
+  select(x,rate.per.10000pm,outcome,var,agegroup))
+
+ggplot(subset(combined,agegroup=='zAge standandardized') ,aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(var),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+theme(axis.title= element_blank())
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\combined_agestandardised.pdf',width=16,height=8,units='cm')
+
+ggplot(subset(combined,agegroup=='70-74') ,aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(var),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+theme(axis.title= element_blank())
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\combined_70_74.pdf',width=16,height=8,units='cm')
+
+ggplot(subset(combined,agegroup=='75-79') ,aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(var),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+theme(axis.title= element_blank())
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\combined_75_79.pdf',width=16,height=8,units='cm')
+
+ggplot(subset(combined,agegroup=='80-84') ,aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(var),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+theme(axis.title= element_blank())
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\combined_80_84.pdf',width=16,height=8,units='cm')
+
+ggplot(subset(combined,agegroup=='85-89') ,aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(var),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+theme(axis.title= element_blank())
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\combined_85_89.pdf',width=16,height=8,units='cm')
+
+ggplot(subset(combined,agegroup=='90-94') ,aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(var),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+theme(axis.title= element_blank())
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\combined_90_94.pdf',width=16,height=8,units='cm')
+
+ggplot(subset(combined,agegroup=='95+') ,aes(x=x,y=rate.per.10000pm,colour=outcome))+geom_line(aes(group=outcome),show.legend = FALSE)+labs(x='Year',y='Deaths per 10,000 person-month')+facet_grid(rows=vars(var),scales='free_y')+geom_vline(xintercept=date('2020-04-01'),linetype='dotted')+theme(axis.title= element_blank())
+
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\combined_ge95.pdf',width=16,height=8,units='cm')
+
+
+
+```
+
+```{r antipsychofig1b, echo=FALSE,fig.cap='Antipsychotics, prescribed All, Olanzapine, Quetiapine,Risperidone'}
+ggarrange(plot1e, plot2e, plot3e,plot4e,plot5e,ncol=5,labels=c('a','o','q','r','b'))
+```
+
+```{r, echo=FALSE,fig.cap='Antipsychotics, prescribed All'}
+plot1e
+```
+
+```{r, echo=FALSE,fig.cap='Antipsychotics, Olanzapine'}
+plot2e
+```
+
+```{r, echo=FALSE,fig.cap='Antipsychotics,  Quetiapine'}
+plot3e
+```
+
+```{r, echo=FALSE,fig.cap='Antipsychotics,Risperidone'}
+plot4e
+```
+
+```{r, echo=FALSE,fig.cap='Benzo'}
+plot5e
+```
+
+```{r antipsychofig2b, echo=FALSE,fig.cap='Antipsychotics, Age standardized'}
+plot6e
+```
+
+
+
+
+
+```{r,include=FALSE,warnings=FALSE}
+#Time series and outlier analysis
+
+pop.ts.rate<-prescribed%>%
+                  filter(agegroup=='zAge standandardized'&drugclass=='all')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r presc any antipsycho additive, echo=FALSE}
+autoplot(pop.ts.rate.a.decomp)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_anyantipsychotic.pdf',width=8,height=6,units='cm')
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+```
+
+```{r presc any antipsycho multiplicative, echo=FALSE,fig.cap='Any anti-psychotic, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r presc any antipsycho outlier, echo=FALSE,fig.cap='Any anti-psychotic, outliers'}
+print(tso.pop.ts.rate)
+```
+
+```{r,include=FALSE,warnings=FALSE}
+
+
+pop.ts.rate<-prescribed%>%
+                  filter(agegroup=='zAge standandardized'&drugclass=='Olanzapine')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r presc Olanzapine antipsycho additive, echo=FALSE}
+autoplot(pop.ts.rate.a.decomp)
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_Olanzapine.pdf',width=8,height=6,units='cm')
+```
+
+```{r presc Olanzapine antipsycho multiplicative, echo=FALSE,fig.cap='Olanzapine, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r presc Olanzapine antipsycho outlier, echo=FALSE,fig.cap='Olanzapine, outliers'}
+print(tso.pop.ts.rate)
+```
+
+```{r,include=FALSE,warnings=FALSE}
+
+
+pop.ts.rate<-prescribed%>%
+                  filter(agegroup=='zAge standandardized'&drugclass=='Quetiapine')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r presc Quetiapine additive, echo=FALSE}
+autoplot(pop.ts.rate.a.decomp)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_Quetiapine.pdf',width=8,height=6,units='cm')
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+```
+
+```{r presc Quetiapine multiplicative, echo=FALSE,fig.cap='Quetiapine, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r presc Quetiapine outlier, echo=FALSE,fig.cap='Quetiapine, outliers'}
+print(tso.pop.ts.rate)
+```
+
+```{r,include=FALSE,warnings=FALSE}
+
+
+pop.ts.rate<-prescribed%>%
+                  filter(agegroup=='zAge standandardized'&drugclass=='Risperidone')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r presc Risperidone additive, echo=FALSE,fig.cap='Risperidone, additive'}
+autoplot(pop.ts.rate.a.decomp)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_Risperidone.pdf',width=8,height=6,units='cm')
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+```
+
+```{r presc Risperidone multiplicative, echo=FALSE,fig.cap='Risperidone, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r presc Risperidone outlier, echo=FALSE,fig.cap='Risperidone, outliers'}
+print(tso.pop.ts.rate)
+```
+
+```{r,include=FALSE,warnings=FALSE}
+
+
+pop.ts.rate<-prescribed%>%
+                  filter(agegroup=='zAge standandardized'&drugclass=='Benzodiazepine')%>%
+                  arrange(year,month)%>%
+                  select(rate.per.10000pm)
+
+pop.ts.rate<-ts(pop.ts.rate$rate.per.10000pm,start=c(2016,1),end=c(2021,6),frequency=12)
+
+tso.pop.ts.rate<-tso(pop.ts.rate,maxit.iloop=15,maxit.oloop=10,types=c("AO","TC","LS"))
+
+pop.ts.rate.a.decomp<-decompose(pop.ts.rate,type=c('additive'))
+
+pop.ts.rate.m.decomp<-decompose(pop.ts.rate,type=c('multiplicative'))
+
+
+```
+
+```{r presc Benzodiazepine additive, echo=FALSE,fig.cap='Benzodiazepine, additive'}
+autoplot(pop.ts.rate.a.decomp)
+#ggsave('S:\\WMCC - WMCC - Wales Multi-morbidity Cardiovascular Covid-19 UK (0911)\\CCU016\\schnierc\\outcome\\decomp_Benzodiazepine.pdf',width=8,height=6,units='cm')
+print(pop.ts.rate.a.decomp$x) 
+print(pop.ts.rate.a.decomp$trend)
+print(pop.ts.rate.a.decomp$seasonal)
+print(pop.ts.rate.a.decomp$random)
+```
+
+```{r presc Benzodiazepine multiplicative, echo=FALSE,fig.cap='Benzodiazepine, multiplicative'}
+autoplot(pop.ts.rate.m.decomp)
+print(pop.ts.rate.m.decomp$x) 
+print(pop.ts.rate.m.decomp$trend)
+print(pop.ts.rate.m.decomp$seasonal)
+print(pop.ts.rate.m.decomp$random)
+```
+
+```{r presc Benzodiazepine outlier, echo=FALSE,fig.cap='Benzodiazepine, outliers'}
+print(tso.pop.ts.rate)
+```
+
